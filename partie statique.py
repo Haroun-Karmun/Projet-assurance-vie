@@ -3,7 +3,6 @@
 # ============================================================
 import numpy as np
 import pandas as pd
-import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
@@ -77,15 +76,6 @@ tableau_mse = pd.DataFrame({nom: ajuster_mse(tab) for nom, tab in jeux.items()},
 print("\n--- Paramètres optimisés par MSE ---")
 print(tableau_mse)
  
-# Plot 1 : Graphiques d'ajustement MSE (Taux bruts vs Taux théoriques)
-fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-for ax, (nom, tab) in zip(axes.flat, jeux.items()):
-    ax.plot(tab.age, tab.mu, "ko", ms=3, label="Taux bruts")
-    ax.plot(tab.age, mu_modele(tableau_mse.loc[nom], tab.age), "r-", lw=2, label="Taux théoriques")
-    ax.set(xlabel="Âge", ylabel=r"$\mu_x$", title=nom)
-    ax.legend(loc="upper left", frameon=False, fontsize=6)
-plt.tight_layout()
-plt.show()
 
 
 # ---- 6. Espérance de vie (modèle MSE) -----------------------------------
@@ -178,16 +168,35 @@ for ax, (nom, tab) in zip(axes.flat, jeux.items()):
 plt.tight_layout()
 plt.show()
 
+# ---- Graphique comparatif en échelle logarithmique --------
+fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+for ax, (nom, tab) in zip(axes.flat, jeux.items()):
+    ax.plot(tab.age, tab.mu, "ko", ms=3, label="Taux bruts")
+    ax.plot(tab.age, mu_modele(tableau_mse.loc[nom], tab.age), "r-", lw=2, label="Modèle MSE")
+    ax.plot(tab.age, mu_modele(tableau_log_like.loc[nom], tab.age), "b--", lw=2,
+            label="Modèle Log-Likelihood")
+    ax.set_yscale("log")
+    ax.axvline(70, color="gray", ls=":", lw=1)  # âge du changement de pente (x = 70)
+    ax.set(xlabel="Âge", ylabel=r"$\mu_x$ (échelle log)", title=nom)
+    ax.legend(loc="upper left", frameon=False, fontsize=6)
+plt.tight_layout()
+plt.show()
+
 
 # ---- 10. Tarification des rentes viagères -----------------------
+# Convention de paiement de la rente : False = fin d'année, True = début d'année
+DEBUT = False
+CONVENTION = "début d'année" if DEBUT else "fin d'année"
+print(f"\n##### Rentes payées en {CONVENTION} #####")
+
 # Hypothèses : i = 1.25%, rente de 1000€, durée de 20 ans, âges 50, 60, 70 (femmes 2020 & 2023)
-def prix_rente(parametres, x, n=20, i=0.0125, montant=1000, debut=False):
+def prix_rente(parametres, x, n=20, i=0.0125, montant=1000, debut=DEBUT):
     v = 1 / (1 + i) # facteur d'actualisation
     mu = mu_modele(parametres, np.arange(x, x + n))
     tpx = np.cumprod(np.exp(-mu))  # probabilités de survie temporaires
     if debut:  # rente payée d'avance
         return montant * np.sum(v ** np.arange(0, n) * np.r_[1, tpx[:n - 1]])
-    return montant * np.sum(v ** np.arange(1, n + 1) * tpx)  # rente payée à échoir
+    return montant * np.sum(v ** np.arange(1, n + 1) * tpx)  # rente payée à terme échu
 
 ages_rentes = [50, 60, 70]
 colonnes = [f"x = {x}" for x in ages_rentes]
@@ -205,43 +214,67 @@ print(prix_log_like)
 
 
 
-# ---- 11. Comparaison avec la table de mortalité légale ---------
-# Table légale belge pour les rentes (FR) : l_x = k s^x g^(c^x)
+# ---- 11. Comparaison avec les tables de mortalité légales ---------
+# Référence principale : table XR (unisexe), nouveaux contrats après le 21/12/2012
+# (AR du 14/11/2003, art. 24 §5 a). Lue dans le fichier fourni (nombre de survivants l_x).
+xr = pd.read_excel(DOSSIER / "data" / "TablesXRXKbrut.xlsm",
+                   header=1, usecols="B:C", engine="openpyxl")
+XR_lx = xr.set_index("Age")["XR"]
+
+def lx_XR(x):
+    return XR_lx.loc[np.atleast_1d(x)].values.astype(float)
+
+# Comparaison secondaire : table FR (femmes, art. 24 §5 b), annexe 1) : l_x = k s^x g^(c^x)
 FR = dict(k=1000048.56, s=0.999669730966, g=0.999951440172, c=1.116792453830)
 
 def lx_FR(x):
+    x = np.atleast_1d(x)
     return FR["k"] * FR["s"] ** x * FR["g"] ** (FR["c"] ** x)
 
-print(lx_FR(0))
-
-def prix_rente_legale(x, n=20, i=0.0125, montant=1000, debut=False):
+# Prix d'une rente temporaire selon une table légale donnée (fonction l_x)
+def prix_rente_legale(lx, x, n=20, i=0.0125, montant=1000, debut=DEBUT):
     v = 1 / (1 + i)
     t = np.arange(0, n) if debut else np.arange(1, n + 1)
-    tpx = lx_FR(x + t) / lx_FR(x)
+    tpx = lx(x + t) / lx(x)[0]
     return montant * np.sum(v ** t * tpx)
 
-# Calcul des prix selon la table réglementaire
-prix_legal = pd.Series([prix_rente_legale(x) for x in ages_rentes], index=colonnes)
+# Prix selon les deux tables légales
+prix_legal_XR = pd.Series([prix_rente_legale(lx_XR, x) for x in ages_rentes], index=colonnes)
+prix_legal_FR = pd.Series([prix_rente_legale(lx_FR, x) for x in ages_rentes], index=colonnes)
 
+# Écarts par rapport à XR (référence principale)
+ecart_mse_XR_percent = 100 * (prix_mse - prix_legal_XR) / prix_legal_XR
+ecart_log_like_XR_percent = 100 * (prix_log_like - prix_legal_XR) / prix_legal_XR
 
-# Calcul des écarts de prix par rapport à la table légale 
-ecart_mse = prix_mse - prix_legal  # en euros
-ecart_mse_percent = 100 * ecart_mse / prix_legal # en % 
-ecart_log_like = prix_log_like - prix_legal
-ecart_log_like_percent = 100 * ecart_log_like / prix_legal
+# Écarts par rapport à FR (comparaison secondaire)
+ecart_mse_FR_percent = 100 * (prix_mse - prix_legal_FR) / prix_legal_FR
+ecart_log_like_FR_percent = 100 * (prix_log_like - prix_legal_FR) / prix_legal_FR
+
+# Écart entre les deux tables légales (effet du sexe : FR par rapport à XR)
+ecart_FR_XR_percent = 100 * (prix_legal_FR - prix_legal_XR) / prix_legal_XR
 
 # Tableau de synthèse des tarifs
 tableau_prix = pd.concat([
     prix_mse.rename(index=lambda n: "MSE_" + n),
     prix_log_like.rename(index=lambda n: "LL_" + n),
-    prix_legal.to_frame("Legal_FR").T,
+    prix_legal_XR.to_frame("Legal_XR").T,
+    prix_legal_FR.to_frame("Legal_FR").T,
 ])
 
 print("\n--- Synthèse comparative des prix des rentes (€) ---")
 print(tableau_prix.round(0))
 
-print("\n--- Écart relatif au tarif réglementaire FR (%) - Modèle MSE ---")
-print(ecart_mse_percent.round(1))
+print("\n--- Écart relatif au tarif réglementaire XR (%) - Modèle MSE ---")
+print(ecart_mse_XR_percent.round(1))
 
-print("\n--- Écart relatif au tarif réglementaire FR (%) - Modèle Log-Likelihood ---")
-print(ecart_log_like_percent.round(1))
+print("\n--- Écart relatif au tarif réglementaire XR (%) - Modèle Log-Likelihood ---")
+print(ecart_log_like_XR_percent.round(1))
+
+print("\n--- Écart relatif au tarif FR (%) - Modèle MSE ---")
+print(ecart_mse_FR_percent.round(1))
+
+print("\n--- Écart relatif au tarif FR (%) - Modèle Log-Likelihood ---")
+print(ecart_log_like_FR_percent.round(1))
+
+print("\n--- Écart entre tables légales : FR par rapport à XR (%) ---")
+print(ecart_FR_XR_percent.round(1))
