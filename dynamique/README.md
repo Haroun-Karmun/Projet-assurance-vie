@@ -1,6 +1,6 @@
 # Partie dynamique — version simplifiée
 
-Double-cliquer sur Lancer.command pour tout calculer.
+Après installation des bibliothèques (voir ci-dessous), lancer partie_dynamique.py dans VS Code.
 Le résultat à lire en premier est resultats/synthese.txt.
 Dans VS Code, le fichier de travail est partie_dynamique.py.
 
@@ -24,7 +24,7 @@ Pour comprendre la méthode, commencer par les calculs, puis lire les lignes de 
 - D/E mesure les décès par personne-année. La probabilité annuelle est q = 1 − exp(−mu).
 - SVD ajuste les log-taux. Poisson ajuste les décès en tenant compte des expositions.
 - Les contraintes somme(beta)=1 et somme(kappa)=0 fixent l'échelle et le centrage.
-- Après SVD, kappa est réajusté aux décès annuels selon la slide 177.
+- Après SVD, kappa est réajusté aux décès annuels selon la slide 177. Les résultats intitulés SVD correspondent donc à cette version réajustée, qui ne minimise plus exactement l’erreur logarithmique initiale.
 - Les mises à jour Poisson suivent les slides 181–183. Elles partent de la SVD.
 - Sur ces données, l'algorithme converge en neuf itérations. Il s'arrête avec un message si la déviance augmente ou si la convergence échoue.
 - Poisson donne la plus petite déviance. Pearson/ddl reste proche de 1,51, ce qui invite à discuter la surdispersion et les résidus.
@@ -42,7 +42,7 @@ Pour comprendre la méthode, commencer par les calculs, puis lire les lignes de 
 ## Ce qui a été simplifié
 
 Le programme principal conserve les deux calibrations, l'analyse des deux kappa, les simulations, les espérances de vie et la comparaison des rentes à XR.
-Les fonctions se limitent aux calculs répétés.
+Les fonctions se limitent aux calculs répétés. La régression AR(1) utilise les moindres carrés de statsmodels. Les fichiers intermédiaires de paramètres et de résidus ainsi que les 10 000 prix individuels ne sont plus sauvegardés : les tableaux récapitulatifs et les cinq graphiques suffisent pour le rapport.
 L'algorithme Poisson écrit séparément les trois mises à jour du cours.
 La recherche de racine SVD utilise directement Newton, avec contrôle du résultat.
 Les comparaisons supplémentaires de la première version (FR, rente à terme avancé, troisième modèle temporel, validation glissante, sensibilité aux grands âges) ont été retirées de cette version simplifiée.
@@ -59,12 +59,21 @@ Données belges HMD fournies dans Deaths_1x1.txt et Exposures_1x1.txt.
 La table XR provient de l'annexe de l'arrêté royal du 29 janvier 2013, reproduite par OpenJustice :
 https://etaamb.openjustice.be/fr/arrete-royal-du-29-janvier-2013_n2013011073.html
 La reproduction est conservée dans data/source_XR.html. Le serveur du Moniteur officiel était inaccessible pendant la préparation.
-Comparer avec le fichier XR du cours pour harmoniser le rapport du groupe.
-La fermeture du dernier intervalle XR, 113–114 ans, suppose des décès uniformes.
+Vérification effectuée avec data/TablesXRXKbrut.xlsm du dépôt du binôme : les 115 valeurs de survivants, de 0 à 114 ans, sont identiques.
+La fermeture du dernier intervalle XR, 113–114 ans, suppose des décès uniformes. Les dernières valeurs ont été vérifiées : l113 = 2 et l114 = 0, ce qui justifie cette fermeture. Les décès et expositions effectivement utilisés dans les données fournies sont strictement positifs ; le script demande de réexaminer les données si ce n’est plus le cas.
 
 ## Relancer ailleurs
 
-Installer les bibliothèques à partir de requirements.txt dans un environnement Python, puis exécuter partie_dynamique.py.
+Dans le terminal de VS Code, depuis ce dossier :
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python partie_dynamique.py
+```
+
+Sur Mac, après cette installation, `zsh Lancer.command` relance le calcul. Sous Windows, activer l’environnement avec `.venv\Scripts\activate` à la place de la commande `source`.
 Les données sont lues depuis le dossier data à côté du script.
 La graine 2030 rend les simulations reproductibles.
 

@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import newton
 from scipy.special import xlogy
 from scipy.stats import shapiro
+from statsmodels.api import OLS, add_constant
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.graphics.tsaplots import plot_acf
@@ -74,9 +75,10 @@ def ajuster_dynamique(kappa, modele):
         sigma = residus.std(ddof=1)  # Dénominateur n-2, slide 188.
     else:
         # Régression : variation suivante = constante + phi*variation précédente.
-        phi, constante = np.polyfit(variations[:-1], variations[1:], 1)
-        residus = variations[1:] - constante - phi * variations[:-1]
-        sigma = np.sqrt(np.sum(residus**2) / (len(residus) - 2))
+        regression = OLS(variations[1:], add_constant(variations[:-1])).fit()
+        constante, phi = regression.params
+        residus = regression.resid
+        sigma = np.sqrt(regression.mse_resid)
         if abs(phi) >= 1:
             raise ValueError("Les variations AR(1) ne sont pas stationnaires.")
     return constante, phi, sigma, residus
@@ -128,7 +130,6 @@ alpha, beta, kappa = normaliser(alpha, beta, kappa)
 modeles = {"SVD": (alpha.copy(), beta.copy(), kappa.copy())}
 
 # Poisson : mises à jour successives des paramètres (slides 181–183).
-historique = []
 for iteration in range(1000):
     log_mu_avant = alpha[:, None] + beta[:, None] * kappa
     attendus = expositions * np.exp(log_mu_avant)
@@ -151,7 +152,6 @@ for iteration in range(1000):
     nouvelle_deviance = deviance(deces, expositions * np.exp(log_mu_apres))
     if not np.isfinite(nouvelle_deviance) or nouvelle_deviance > deviance_avant + 1e-7:
         raise RuntimeError("L'algorithme Poisson doit être stabilisé pour ces données.")
-    historique.append(nouvelle_deviance)
     if np.max(np.abs(log_mu_apres - log_mu_avant)) < 1e-9:
         break
 else:
@@ -171,12 +171,6 @@ for nom, (alpha, beta, kappa) in modeles.items():
     axes[0].plot(ages, alpha, label=nom)
     axes[1].plot(ages, beta, label=nom)
     axes[2].plot(annees, kappa, label=nom)
-    pd.DataFrame({"age": ages, "alpha": alpha, "beta": beta}).to_csv(
-        RESULTATS / f"q1_parametres_{nom}.csv", index=False)
-    pd.DataFrame({"annee": annees, "kappa": kappa}).to_csv(
-        RESULTATS / f"q1_kappa_{nom}.csv", index=False)
-    pd.DataFrame(residus, index=ages, columns=annees).to_csv(
-        RESULTATS / f"q1_residus_{nom}.csv")
 for ax, titre in zip(axes, ["Profil α par âge", "Sensibilité β par âge", "Indice κ par année"]):
     ax.set_title(titre)
     ax.legend()
@@ -186,7 +180,9 @@ comparaison.to_csv(RESULTATS / "q1_comparaison.csv", index=False)
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 for ax, nom in zip(axes, modeles):
-    residus = pd.read_csv(RESULTATS / f"q1_residus_{nom}.csv", index_col=0)
+    alpha, beta, kappa = modeles[nom]
+    attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
+    residus = (deces - attendus) / np.sqrt(attendus)
     image = ax.imshow(residus, origin="lower", aspect="auto", cmap="RdBu_r",
                       extent=[1989.5, 2018.5, 19.5, 100.5], vmin=-5, vmax=5)
     ax.set(title=nom, xlabel="Année", ylabel="Âge")
@@ -299,7 +295,6 @@ for nom, (alpha, beta, _) in modeles.items():
         "ecart_type": prix.std(ddof=1), "p01": np.quantile(prix, .01),
         "p05": np.quantile(prix, .05), "p95": np.quantile(prix, .95),
         "p99": np.quantile(prix, .99)})
-    pd.DataFrame({"prix": prix}).to_csv(RESULTATS / f"q4_simulations_{nom}.csv", index=False)
     ax.hist(prix, bins=40, alpha=.5, density=True, label=nom)
 
 prix_xr = 0.0
