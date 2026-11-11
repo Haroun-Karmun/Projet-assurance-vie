@@ -1,5 +1,22 @@
+
 """LACTU2030 — Partie dynamique.
 Femmes belges, 20–100 ans, 1990–2018.
+Lecture : Q1 estime les paramètres ; Q2 décrit leur évolution ;
+Q3 simule la mortalité ; Q4 utilise ces scénarios pour calculer la rente.
+alpha = niveau par âge, beta = sensibilité, kappa = indice dans le temps.
+mu = force de mortalité ; q = probabilité annuelle de décès.
+N = nombre de scénarios ; interet = taux utilisé pour actualiser la rente.
+Repères Python :
+- Une variable est un nom donné à une valeur ou à un tableau.
+- Une fonction (def) regroupe un calcul ; return donne son résultat.
+- Une boucle (for) répète un calcul pour chaque année ou chaque modèle.
+- Les tableaux commencent à l’indice 0 ; [-1] désigne le dernier élément.
+- Dans Q1, une ligne = un âge, une colonne = une année.
+  sum(axis=1) additionne les années ; sum(axis=0) additionne les âges.
+- Dans Q3, une ligne = un scénario, une colonne = un âge :
+  mean(axis=0) fait donc la moyenne des scénarios pour chaque âge.
+- [:, t] sélectionne toutes les lignes de la colonne t.
+
 Exécuter le fichier entier. Les résultats sont dans resultats/.
 """
 from pathlib import Path
@@ -25,8 +42,8 @@ from statsmodels.graphics.tsaplots import plot_acf
 
 ages = np.arange(20, 101)
 annees = np.arange(1990, 2019)
-nombre_simulations = 10000
-taux_interet = 0.0125
+N = 10000  # Nombre de scénarios simulés.
+interet = 0.0125
 
 
 # Fonctions utilisées plusieurs fois
@@ -45,7 +62,7 @@ def lire_matrice(nom, ages_voulus, annees_voulues):
 
 
 def normaliser(alpha, beta, kappa):
-    # Ces transformations conservent alpha + beta*kappa.
+    # Imposer moyenne(kappa)=0 et somme(beta)=1 sans changer les mortalités.
     moyenne = kappa.mean()
     somme = beta.sum()
     if abs(somme) < 1e-10:
@@ -72,7 +89,7 @@ def ajuster_dynamique(kappa, modele):
         constante = variations.mean()
         phi = 0.0
         residus = variations - constante
-        sigma = residus.std(ddof=1)  # Dénominateur n-2, slide 188.
+        sigma = residus.std(ddof=1)  # Dispersion des variations autour de leur moyenne.
     else:
         # Régression : variation suivante = constante + phi*variation précédente.
         regression = OLS(variations[1:], add_constant(variations[:-1])).fit()
@@ -95,11 +112,35 @@ def esperance_vie(mu, age):
     suite = mu[-1] * np.exp(pente * (ages_futurs - ages_connus[-1]))
     mu = np.concatenate([mu, suite])[age - 20:]
     survie_fin = np.exp(-np.cumsum(mu))
-    survie_debut = np.r_[1.0, survie_fin[:-1]]
+    survie_debut = np.concatenate(([1.0], survie_fin[:-1]))
     if survie_fin[-1] > 1e-10:
         raise ValueError("La survie à 141 ans doit être négligeable.")
     # Temps moyen vécu dans chaque année, avec une force constante.
     return np.sum(survie_debut * (-np.expm1(-mu)) / mu)
+
+
+def simuler_kappa(kappa, constante, phi, sigma):
+    """Une ligne par scénario, une colonne par année de 2018 à 2038."""
+    rng = np.random.default_rng(2030)
+    chemins = np.zeros((N, 21))
+    chemins[:, 0] = kappa[-1]
+    variation = np.full(N, kappa[-1] - kappa[-2])
+    for t in range(1, 21):
+        choc = rng.normal(0, sigma, N)
+        variation = constante + phi * variation + choc
+        chemins[:, t] = chemins[:, t - 1] + variation
+    return chemins
+
+
+def esperance_xr(age, xr):
+    """Additionner les années vécues, pondérées par la survie depuis age."""
+    survivants = xr.loc[age:114].to_numpy(float)
+    survie = survivants / survivants[0]
+    forces = -np.log(survivants[1:-1] / survivants[:-2])
+    temps_dans_annee = (1 - np.exp(-forces)) / forces
+    total = np.sum(survie[:-2] * temps_dans_annee)
+    # Entre 113 et 114 ans, les derniers décès sont supposés uniformes.
+    return total + survie[-2] / 2
 
 
 # Q1 — Ajuster Lee–Carter
@@ -110,6 +151,7 @@ mu_observe = deces / expositions
 # SVD : retirer le niveau moyen par âge, puis garder le premier facteur.
 log_mu = np.log(mu_observe)
 alpha = log_mu.mean(axis=1)
+# [:, None] met les valeurs par âge en colonne pour chaque année.
 matrice_centree = log_mu - alpha[:, None]
 u, valeurs, vt = np.linalg.svd(matrice_centree, full_matrices=False)
 alpha, beta, kappa = normaliser(alpha, u[:, 0], valeurs[0] * vt[0])
@@ -160,7 +202,8 @@ modeles["Poisson"] = (alpha.copy(), beta.copy(), kappa.copy())
 
 comparaison = []
 fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-for nom, (alpha, beta, kappa) in modeles.items():
+for nom in modeles:
+    alpha, beta, kappa = modeles[nom]
     mu = np.exp(alpha[:, None] + beta[:, None] * kappa)
     attendus = expositions * mu
     residus = (deces - attendus) / np.sqrt(attendus)
@@ -195,7 +238,8 @@ plt.close()
 diagnostics = []
 dynamiques = {}
 fig, axes = plt.subplots(2, 2, figsize=(11, 7))
-for ligne, (nom, (_, _, kappa)) in enumerate(modeles.items()):
+for ligne, nom in enumerate(modeles):
+    alpha, beta, kappa = modeles[nom]
     variations = np.diff(kappa)
     axes[ligne, 0].plot(annees[1:], variations, marker="o")
     axes[ligne, 0].set_title(f"Variations de κ — {nom}")
@@ -203,7 +247,10 @@ for ligne, (nom, (_, _, kappa)) in enumerate(modeles.items()):
 
     for modele in ["Marche", "AR1"]:
         constante, phi, sigma, residus = ajuster_dynamique(kappa, modele)
-        retard_modele = int(modele == "AR1")
+        if modele == "AR1":
+            retard_modele = 1
+        else:
+            retard_modele = 0
         p_lb = acorr_ljungbox(residus, lags=[5], model_df=retard_modele).lb_pvalue.iloc[0]
         diagnostics.append({"methode": nom, "modele": modele,
             "constante": constante, "phi": phi, "sigma": sigma,
@@ -214,40 +261,43 @@ for ligne, (nom, (_, _, kappa)) in enumerate(modeles.items()):
     # Sur ces données, la marche laisse de l'autocorrélation (p < 5 %).
     # AR(1) permet à la variation suivante de dépendre de la précédente.
     marche, ar1 = diagnostics[-2:]
-    choix = "AR1" if marche["Ljung_Box_p"] < 0.05 else "Marche"
+    if marche["Ljung_Box_p"] < 0.05:
+        choix = "AR1"
+    else:
+        choix = "Marche"
     if choix == "AR1" and ar1["Ljung_Box_p"] < 0.05:
         raise RuntimeError("Revoir le modèle temporel : résidus autocorrélés.")
-    dynamiques[nom] = ajuster_dynamique(kappa, choix)[:3]
+    constante, phi, sigma, residus = ajuster_dynamique(kappa, choix)
+    dynamiques[nom] = (constante, phi, sigma)
 sauvegarder_figure("q2_diagnostics.png")
 pd.DataFrame(diagnostics).to_csv(RESULTATS / "q2_diagnostics.csv", index=False)
 
 
 # Q3 — Simuler les mortalités en 2023 et les espérances de vie
 xr = pd.read_csv(DOSSIER / "data" / "table_XR.csv").set_index("age")["lx"]
-ages_reels = np.arange(20, 110)
-mu_reel = lire_matrice("Deaths_1x1.txt", ages_reels, [2023]).ravel()
-mu_reel /= lire_matrice("Exposures_1x1.txt", ages_reels, [2023]).ravel()
+ages_bruts = np.arange(20, 110)
+mu_brut = lire_matrice("Deaths_1x1.txt", ages_bruts, [2023]).ravel()
+mu_brut /= lire_matrice("Exposures_1x1.txt", ages_bruts, [2023]).ravel()
 trajectoires = {}
 esperances = []
 fig, ax = plt.subplots(figsize=(8, 5))
 
-for nom, (alpha, beta, kappa) in modeles.items():
+for nom in modeles:
+    alpha, beta, kappa = modeles[nom]
     constante, phi, sigma = dynamiques[nom]
-    rng = np.random.default_rng(2030)
-    chemins = np.zeros((nombre_simulations, 21))
-    chemins[:, 0] = kappa[-1]
-    variation = np.full(nombre_simulations, kappa[-1] - kappa[-2])
-    for t in range(1, 21):
-        choc = rng.normal(0, sigma, nombre_simulations)
-        variation = constante + phi * variation + choc
-        chemins[:, t] = chemins[:, t - 1] + variation
+    chemins = simuler_kappa(kappa, constante, phi, sigma)
     trajectoires[nom] = chemins
 
     # La colonne 0 est 2018, la colonne 5 est donc 2023.
-    mu_2023 = np.exp(alpha + chemins[:, 5, None] * beta)
+    # Ici : une ligne par scénario et une colonne par âge.
+    kappa_2023 = chemins[:, 5, None]
+    log_mu_2023 = alpha + kappa_2023 * beta
+    mu_2023 = np.exp(log_mu_2023)
     q_2023 = 1 - np.exp(-mu_2023)
     statistiques = pd.DataFrame({"age": ages})
-    for variable, valeurs_simulees in [("mu", mu_2023), ("q", q_2023)]:
+    mortalites = {"mu": mu_2023, "q": q_2023}
+    for variable in mortalites:
+        valeurs_simulees = mortalites[variable]
         statistiques[variable + "_moyenne"] = valeurs_simulees.mean(axis=0)
         statistiques[variable + "_ecart_type"] = valeurs_simulees.std(axis=0, ddof=1)
         statistiques[variable + "_p025"] = np.quantile(valeurs_simulees, .025, axis=0)
@@ -255,24 +305,21 @@ for nom, (alpha, beta, kappa) in modeles.items():
     statistiques.to_csv(RESULTATS / f"q3_mortalite_{nom}.csv", index=False)
     ax.plot(ages, statistiques.q_moyenne, label=nom)
     ax.fill_between(ages, statistiques.q_p025, statistiques.q_p975, alpha=.2)
-    mu_moyen_equivalent = -np.log(1 - q_2023.mean(axis=0))
+    q_moyen = q_2023.mean(axis=0)
+    mu_moyen = -np.log(1 - q_moyen)
     for age in [20, 30, 40, 50, 60, 70]:
         esperances.append({"table": nom, "age": age,
-                          "esperance": esperance_vie(mu_moyen_equivalent, age)})
+                          "esperance": esperance_vie(mu_moyen, age)})
 
 for age in [20, 30, 40, 50, 60, 70]:
     esperances.append({"table": "Brut 2023", "age": age,
-                      "esperance": esperance_vie(mu_reel, age)})
-    survivants = xr.loc[age:114].to_numpy(float)
-    survie = survivants / survivants[0]
-    forces = -np.log(survivants[1:-1] / survivants[:-2])
-    vie_xr = np.sum(survie[:-2] * (1 - np.exp(-forces)) / forces)
-    vie_xr += survie[-2] / 2  # Fermeture uniforme de la dernière année XR.
-    esperances.append({"table": "XR", "age": age, "esperance": vie_xr})
+                      "esperance": esperance_vie(mu_brut, age)})
+    esperances.append({"table": "XR", "age": age,
+                      "esperance": esperance_xr(age, xr)})
 
 esperances = pd.DataFrame(esperances).pivot(index="age", columns="table", values="esperance")
 esperances.to_csv(RESULTATS / "q3_esperances_vie.csv")
-ax.plot(ages_reels, 1 - np.exp(-mu_reel), color="black", label="Brut 2023")
+ax.plot(ages_bruts, 1 - np.exp(-mu_brut), color="black", label="Brut 2023")
 ax.set(xlabel="Âge", ylabel="Probabilité annuelle q", yscale="log",
        title="Mortalité 2023 et intervalles ponctuels à 95 %")
 ax.legend()
@@ -282,15 +329,20 @@ sauvegarder_figure("q3_mortalite.png")
 # Q4 — Rente de 1000 euros, 20 ans, à terme échu
 resultats_rente = []
 fig, ax = plt.subplots(figsize=(8, 5))
-for nom, (alpha, beta, _) in modeles.items():
-    survie = np.ones(nombre_simulations)
-    prix = np.zeros(nombre_simulations)
+for nom in modeles:
+    alpha, beta, kappa = modeles[nom]
+    survie = np.ones(N)
+    prix = np.zeros(N)
     for t in range(20):
-        indice_age = 60 + t - 20
+        age = 60 + t
+        indice_age = age - ages[0]  # La première ligne correspond à 20 ans.
         kappa = trajectoires[nom][:, t]
         mu = np.exp(alpha[indice_age] + beta[indice_age] * kappa)
+        # Survivre une année de plus, puis actualiser le paiement de fin d’année.
         survie *= np.exp(-mu)
-        prix += 1000 * survie / (1 + taux_interet)**(t + 1)
+        paiement_espere = 1000 * survie
+        facteur_actualisation = (1 + interet)**(t + 1)
+        prix += paiement_espere / facteur_actualisation
     resultats_rente.append({"table": nom, "moyenne": prix.mean(),
         "ecart_type": prix.std(ddof=1), "p01": np.quantile(prix, .01),
         "p05": np.quantile(prix, .05), "p95": np.quantile(prix, .95),
@@ -300,7 +352,7 @@ for nom, (alpha, beta, _) in modeles.items():
 prix_xr = 0.0
 for t in range(1, 21):
     survie = xr.loc[60 + t] / xr.loc[60]
-    prix_xr += 1000 * survie / (1 + taux_interet)**t
+    prix_xr += 1000 * survie / (1 + interet)**t
 resultats_rente.append({"table": "XR", "moyenne": prix_xr, "ecart_type": 0.0})
 rentes = pd.DataFrame(resultats_rente)
 rentes.to_csv(RESULTATS / "q4_rentes.csv", index=False)
