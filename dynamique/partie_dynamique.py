@@ -67,67 +67,45 @@ def sauvegarder_figure(nom):
     plt.close()
 
 
-def ajuster_dynamique(kappa, modele):
-    variations = np.diff(kappa)
-    if modele == "Marche":
-        constante = variations.mean()
-        phi = 0.0
-        residus = variations - constante
-        sigma = residus.std(ddof=1)  # Dispersion des variations autour de leur moyenne.
-    else:
-        # Régression : variation suivante = constante + phi*variation précédente.
-        regression = OLS(variations[1:], add_constant(variations[:-1])).fit()
-        constante, phi = regression.params
-        residus = regression.resid
-        sigma = np.sqrt(regression.mse_resid)
-        if abs(phi) >= 1:
-            raise ValueError("Les variations AR(1) ne sont pas stationnaires.")
-    return constante, phi, sigma, residus
-
-
-def esperance_vie(mu, age):
-    # Prolongement Gompertz après le dernier âge disponible.
-    ages_connus = np.arange(20, 20 + len(mu))
-    grands_ages = (ages_connus >= 90) & (ages_connus <= 100)
-    pente = np.polyfit(ages_connus[grands_ages], np.log(mu[grands_ages]), 1)[0]
-    if pente <= 0:
-        raise ValueError("Vérifier la pente de mortalité aux grands âges.")
-    ages_futurs = np.arange(ages_connus[-1] + 1, 141)
-    suite = mu[-1] * np.exp(pente * (ages_futurs - ages_connus[-1]))
-    mu = np.concatenate([mu, suite])[age - 20:]
-    survie_fin = np.exp(-np.cumsum(mu))
-    survie_debut = np.concatenate(([1.0], survie_fin[:-1]))
-    if survie_fin[-1] > 1e-10:
-        raise ValueError("La survie à 141 ans doit être négligeable.")
-    # Temps moyen vécu dans chaque année, avec une force constante.
-    return np.sum(survie_debut * (-np.expm1(-mu)) / mu)
-
-
-def simuler_kappa(kappa, constante, phi, sigma):
-    """Une ligne par scénario, une colonne par année de 2018 à 2038."""
-    rng = np.random.default_rng(2030)
-    chemins = np.zeros((N, 21))
-    chemins[:, 0] = kappa[-1]
-    variation = np.full(N, kappa[-1] - kappa[-2])
-    for t in range(1, 21):
-        choc = rng.normal(0, sigma, N)
-        variation = constante + phi * variation + choc
-        chemins[:, t] = chemins[:, t - 1] + variation
-    return chemins
-
-
-def esperance_xr(age, xr):
-    """Additionner les années vécues, pondérées par la survie depuis age."""
-    survivants = xr.loc[age:114].to_numpy(float)
-    survie = survivants / survivants[0]
-    forces = -np.log(survivants[1:-1] / survivants[:-2])
-    temps_dans_annee = (1 - np.exp(-forces)) / forces
-    total = np.sum(survie[:-2] * temps_dans_annee)
-    # Entre 113 et 114 ans, les derniers décès sont supposés uniformes.
-    return total + survie[-2] / 2
-
-
 # Q1 — Ajuster Lee–Carter
+
+def ajuster_poisson(deces, expositions, alpha, beta, kappa):
+    # Partir de SVD et conserver ses paramètres pour la comparaison finale.
+    alpha, beta, kappa = alpha.copy(), beta.copy(), kappa.copy()
+    # Poisson : répéter trois corrections de Newton (slides 181–183).
+    for iteration in range(1000):
+        log_mu_avant = alpha[:, None] + beta[:, None] * kappa
+        attendus = expositions * np.exp(log_mu_avant)
+        deviance_avant = deviance(deces, attendus)
+
+        # 1. Corriger le niveau de chaque âge (alpha).
+        ecart = (deces - attendus).sum(axis=1)
+        alpha += ecart / attendus.sum(axis=1)
+        attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
+
+        # 2. Corriger chaque année (kappa), avec alpha et beta fixés.
+        numerateur = ((deces - attendus) * beta[:, None]).sum(axis=0)
+        denominateur = (attendus * beta[:, None]**2).sum(axis=0)
+        kappa += numerateur / denominateur
+        attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
+
+        # 3. Corriger la sensibilité de chaque âge (beta).
+        numerateur = ((deces - attendus) * kappa).sum(axis=1)
+        denominateur = (attendus * kappa**2).sum(axis=1)
+        beta += numerateur / denominateur
+
+        alpha, beta, kappa = normaliser(alpha, beta, kappa)
+        log_mu_apres = alpha[:, None] + beta[:, None] * kappa
+        nouvelle_deviance = deviance(deces, expositions * np.exp(log_mu_apres))
+        if not np.isfinite(nouvelle_deviance) or nouvelle_deviance > deviance_avant + 1e-7:
+            raise RuntimeError("L'algorithme Poisson doit être stabilisé pour ces données.")
+        if np.max(np.abs(log_mu_apres - log_mu_avant)) < 1e-9:
+            break
+    else:
+        raise RuntimeError("L'algorithme Poisson n'a pas convergé.")
+    return alpha, beta, kappa
+
+
 deces = lire_matrice("Deaths_1x1.txt", ages, annees)
 expositions = lire_matrice("Exposures_1x1.txt", ages, annees)
 mu_observe = deces / expositions
@@ -155,37 +133,7 @@ for t in range(len(annees)):
 alpha, beta, kappa = normaliser(alpha, beta, kappa)
 modeles = {"SVD": (alpha.copy(), beta.copy(), kappa.copy())}
 
-# Poisson : répéter trois corrections de Newton (slides 181–183).
-for iteration in range(1000):
-    log_mu_avant = alpha[:, None] + beta[:, None] * kappa
-    attendus = expositions * np.exp(log_mu_avant)
-    deviance_avant = deviance(deces, attendus)
-
-    # 1. Corriger le niveau de chaque âge (alpha).
-    ecart = (deces - attendus).sum(axis=1)
-    alpha += ecart / attendus.sum(axis=1)
-    attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
-
-    # 2. Corriger chaque année (kappa), avec alpha et beta fixés.
-    numerateur = ((deces - attendus) * beta[:, None]).sum(axis=0)
-    denominateur = (attendus * beta[:, None]**2).sum(axis=0)
-    kappa += numerateur / denominateur
-    attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
-
-    # 3. Corriger la sensibilité de chaque âge (beta).
-    numerateur = ((deces - attendus) * kappa).sum(axis=1)
-    denominateur = (attendus * kappa**2).sum(axis=1)
-    beta += numerateur / denominateur
-
-    alpha, beta, kappa = normaliser(alpha, beta, kappa)
-    log_mu_apres = alpha[:, None] + beta[:, None] * kappa
-    nouvelle_deviance = deviance(deces, expositions * np.exp(log_mu_apres))
-    if not np.isfinite(nouvelle_deviance) or nouvelle_deviance > deviance_avant + 1e-7:
-        raise RuntimeError("L'algorithme Poisson doit être stabilisé pour ces données.")
-    if np.max(np.abs(log_mu_apres - log_mu_avant)) < 1e-9:
-        break
-else:
-    raise RuntimeError("L'algorithme Poisson n'a pas convergé.")
+alpha, beta, kappa = ajuster_poisson(deces, expositions, alpha, beta, kappa)
 modeles["Poisson"] = (alpha.copy(), beta.copy(), kappa.copy())
 
 comparaison = []
@@ -223,6 +171,24 @@ plt.close()
 
 
 # Q2 — Analyser kappa et choisir sa dynamique
+
+def ajuster_dynamique(kappa, modele):
+    variations = np.diff(kappa)
+    if modele == "Marche":
+        constante = variations.mean()
+        phi = 0.0
+        residus = variations - constante
+        sigma = residus.std(ddof=1)  # Dispersion des variations autour de leur moyenne.
+    else:
+        # Régression : variation suivante = constante + phi*variation précédente.
+        regression = OLS(variations[1:], add_constant(variations[:-1])).fit()
+        constante, phi = regression.params
+        residus = regression.resid
+        sigma = np.sqrt(regression.mse_resid)
+        if abs(phi) >= 1:
+            raise ValueError("Les variations AR(1) ne sont pas stationnaires.")
+    return constante, phi, sigma, residus
+
 diagnostics = []
 dynamiques = {}
 fig, axes = plt.subplots(2, 2, figsize=(11, 7))
@@ -262,6 +228,46 @@ pd.DataFrame(diagnostics).to_csv(RESULTATS / "q2_diagnostics.csv", index=False)
 
 
 # Q3 — Simuler les mortalités en 2023 et les espérances de vie
+
+def simuler_kappa(kappa, constante, phi, sigma):
+    """Une ligne par scénario, une colonne par année de 2018 à 2038."""
+    rng = np.random.default_rng(2030)
+    chemins = np.zeros((N, 21))
+    chemins[:, 0] = kappa[-1]
+    variation = np.full(N, kappa[-1] - kappa[-2])
+    for t in range(1, 21):
+        choc = rng.normal(0, sigma, N)
+        variation = constante + phi * variation + choc
+        chemins[:, t] = chemins[:, t - 1] + variation
+    return chemins
+
+def esperance_vie(mu, age):
+    # Prolongement Gompertz après le dernier âge disponible.
+    ages_connus = np.arange(20, 20 + len(mu))
+    grands_ages = (ages_connus >= 90) & (ages_connus <= 100)
+    pente = np.polyfit(ages_connus[grands_ages], np.log(mu[grands_ages]), 1)[0]
+    if pente <= 0:
+        raise ValueError("Vérifier la pente de mortalité aux grands âges.")
+    ages_futurs = np.arange(ages_connus[-1] + 1, 141)
+    suite = mu[-1] * np.exp(pente * (ages_futurs - ages_connus[-1]))
+    mu = np.concatenate([mu, suite])[age - 20:]
+    survie_fin = np.exp(-np.cumsum(mu))
+    survie_debut = np.concatenate(([1.0], survie_fin[:-1]))
+    if survie_fin[-1] > 1e-10:
+        raise ValueError("La survie à 141 ans doit être négligeable.")
+    # Temps moyen vécu dans chaque année, avec une force constante.
+    return np.sum(survie_debut * (-np.expm1(-mu)) / mu)
+
+def esperance_xr(age, xr):
+    """Additionner les années vécues, pondérées par la survie depuis age."""
+    survivants = xr.loc[age:114].to_numpy(float)
+    survie = survivants / survivants[0]
+    forces = -np.log(survivants[1:-1] / survivants[:-2])
+    temps_dans_annee = (1 - np.exp(-forces)) / forces
+    total = np.sum(survie[:-2] * temps_dans_annee)
+    # Entre 113 et 114 ans, les derniers décès sont supposés uniformes.
+    return total + survie[-2] / 2
+
 xr = pd.read_csv(DOSSIER / "data" / "table_XR.csv").set_index("age")["lx"]
 ages_bruts = np.arange(20, 110)
 mu_brut = lire_matrice("Deaths_1x1.txt", ages_bruts, [2023]).ravel()
