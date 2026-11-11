@@ -1,22 +1,6 @@
 
 """LACTU2030 — Partie dynamique.
 Femmes belges, 20–100 ans, 1990–2018.
-Lecture : Q1 estime les paramètres ; Q2 décrit leur évolution ;
-Q3 simule la mortalité ; Q4 utilise ces scénarios pour calculer la rente.
-alpha = niveau par âge, beta = sensibilité, kappa = indice dans le temps.
-mu = force de mortalité ; q = probabilité annuelle de décès.
-N = nombre de scénarios ; interet = taux utilisé pour actualiser la rente.
-Repères Python :
-- Une variable est un nom donné à une valeur ou à un tableau.
-- Une fonction (def) regroupe un calcul ; return donne son résultat.
-- Une boucle (for) répète un calcul pour chaque année ou chaque modèle.
-- Les tableaux commencent à l’indice 0 ; [-1] désigne le dernier élément.
-- Dans Q1, une ligne = un âge, une colonne = une année.
-  sum(axis=1) additionne les années ; sum(axis=0) additionne les âges.
-- Dans Q3, une ligne = un scénario, une colonne = un âge :
-  mean(axis=0) fait donc la moyenne des scénarios pour chaque âge.
-- [:, t] sélectionne toutes les lignes de la colonne t.
-
 Exécuter le fichier entier. Les résultats sont dans resultats/.
 """
 from pathlib import Path
@@ -171,20 +155,24 @@ for t in range(len(annees)):
 alpha, beta, kappa = normaliser(alpha, beta, kappa)
 modeles = {"SVD": (alpha.copy(), beta.copy(), kappa.copy())}
 
-# Poisson : mises à jour successives des paramètres (slides 181–183).
+# Poisson : répéter trois corrections de Newton (slides 181–183).
 for iteration in range(1000):
     log_mu_avant = alpha[:, None] + beta[:, None] * kappa
     attendus = expositions * np.exp(log_mu_avant)
     deviance_avant = deviance(deces, attendus)
 
-    alpha += (deces - attendus).sum(axis=1) / attendus.sum(axis=1)
+    # 1. Corriger le niveau de chaque âge (alpha).
+    ecart = (deces - attendus).sum(axis=1)
+    alpha += ecart / attendus.sum(axis=1)
     attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
 
+    # 2. Corriger chaque année (kappa), avec alpha et beta fixés.
     numerateur = ((deces - attendus) * beta[:, None]).sum(axis=0)
     denominateur = (attendus * beta[:, None]**2).sum(axis=0)
     kappa += numerateur / denominateur
     attendus = expositions * np.exp(alpha[:, None] + beta[:, None] * kappa)
 
+    # 3. Corriger la sensibilité de chaque âge (beta).
     numerateur = ((deces - attendus) * kappa).sum(axis=1)
     denominateur = (attendus * kappa**2).sum(axis=1)
     beta += numerateur / denominateur
@@ -245,6 +233,8 @@ for ligne, nom in enumerate(modeles):
     axes[ligne, 0].set_title(f"Variations de κ — {nom}")
     plot_acf(variations, lags=8, ax=axes[ligne, 1], title=f"Autocorrélation — {nom}")
 
+    p_adf = adfuller(kappa, regression="ct", maxlag=3, autolag="AIC")[1]
+    p_adf_variations = adfuller(variations, maxlag=3, autolag="AIC")[1]
     for modele in ["Marche", "AR1"]:
         constante, phi, sigma, residus = ajuster_dynamique(kappa, modele)
         if modele == "AR1":
@@ -255,20 +245,18 @@ for ligne, nom in enumerate(modeles):
         diagnostics.append({"methode": nom, "modele": modele,
             "constante": constante, "phi": phi, "sigma": sigma,
             "Ljung_Box_p": p_lb, "Shapiro_p": shapiro(residus).pvalue,
-            "ADF_niveau_p": adfuller(kappa, regression="ct", maxlag=3, autolag="AIC")[1],
-            "ADF_differences_p": adfuller(variations, maxlag=3, autolag="AIC")[1]})
+            "ADF_niveau_p": p_adf,
+            "ADF_differences_p": p_adf_variations})
 
     # Sur ces données, la marche laisse de l'autocorrélation (p < 5 %).
     # AR(1) permet à la variation suivante de dépendre de la précédente.
     marche, ar1 = diagnostics[-2:]
+    retenu = marche
     if marche["Ljung_Box_p"] < 0.05:
-        choix = "AR1"
-    else:
-        choix = "Marche"
-    if choix == "AR1" and ar1["Ljung_Box_p"] < 0.05:
+        retenu = ar1
+    if retenu["Ljung_Box_p"] < 0.05:
         raise RuntimeError("Revoir le modèle temporel : résidus autocorrélés.")
-    constante, phi, sigma, residus = ajuster_dynamique(kappa, choix)
-    dynamiques[nom] = (constante, phi, sigma)
+    dynamiques[nom] = (retenu["constante"], retenu["phi"], retenu["sigma"])
 sauvegarder_figure("q2_diagnostics.png")
 pd.DataFrame(diagnostics).to_csv(RESULTATS / "q2_diagnostics.csv", index=False)
 
